@@ -150,6 +150,7 @@ always @(posedge ulpi_clk)
         reg_dout_reg <= ulpi_data_in;
       
 // AXI-Stream TX logic
+// TODO: Add register slice for better timing of ulpi_dir & ulpi_nxt
 assign tx_strobe = tx_tvalid & tx_tready;
       
 always @(posedge ulpi_clk) begin

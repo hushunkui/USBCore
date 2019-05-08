@@ -53,16 +53,16 @@ function [15:0] crc16;
     input [7:0]  d;
     input [15:0] c;
 begin
-    crc16[0]  = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[6] ^ d[7] ^ c[8] ^ c[9] ^ c[10] ^ c[11] ^ c[12] ^ c[13] ^ c[14] ^ c[15];
-    crc16[1]  = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[6] ^ c[9] ^ c[10] ^ c[11] ^ c[12] ^ c[13] ^ c[14] ^ c[15];
-    crc16[2]  = d[6] ^ d[7] ^ c[8] ^ c[9];
-    crc16[3]  = d[5] ^ d[6] ^ c[9] ^ c[10];
-    crc16[4]  = d[4] ^ d[5] ^ c[10] ^ c[11];
-    crc16[5]  = d[3] ^ d[4] ^ c[11] ^ c[12];
-    crc16[6]  = d[2] ^ d[3] ^ c[12] ^ c[13];
-    crc16[7]  = d[1] ^ d[2] ^ c[13] ^ c[14];
-    crc16[8]  = d[0] ^ d[1] ^ c[0] ^ c[14] ^ c[15];
-    crc16[9]  = d[0] ^ c[1] ^ c[15];
+    crc16[ 0] = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[6] ^ d[7] ^ c[8] ^ c[9] ^ c[10] ^ c[11] ^ c[12] ^ c[13] ^ c[14] ^ c[15];
+    crc16[ 1] = d[0] ^ d[1] ^ d[2] ^ d[3] ^ d[4] ^ d[5] ^ d[6] ^ c[9] ^ c[10] ^ c[11] ^ c[12] ^ c[13] ^ c[14] ^ c[15];
+    crc16[ 2] = d[6] ^ d[7] ^ c[8] ^ c[9];
+    crc16[ 3] = d[5] ^ d[6] ^ c[9] ^ c[10];
+    crc16[ 4] = d[4] ^ d[5] ^ c[10] ^ c[11];
+    crc16[ 5] = d[3] ^ d[4] ^ c[11] ^ c[12];
+    crc16[ 6] = d[2] ^ d[3] ^ c[12] ^ c[13];
+    crc16[ 7] = d[1] ^ d[2] ^ c[13] ^ c[14];
+    crc16[ 8] = d[0] ^ d[1] ^ c[0] ^ c[14] ^ c[15];
+    crc16[ 9] = d[0] ^ c[1] ^ c[15];
     crc16[10] = c[2];
     crc16[11] = c[3];
     crc16[12] = c[4];
@@ -79,11 +79,11 @@ localparam S_TX_IDLE = 0, S_TX_ACK_PID = 1;
 reg  [2:0]      rx_state;
 wire            rx_strobe;
 reg  [3:0]      rx_pid;
-reg  [7:0]      rx_tdata_prev;
+reg  [7:0]      rx_tdata_prev[0:1];
+reg             rx_tdata_prev_valid[0:2];
 wire [4:0]      rx_crc5;
 wire            rx_crc5_valid;
-reg             rx_crc_en;
-reg  [15:0]     rx_crc16;
+reg  [15:0]     rx_crc16, rx_crc16_rev;
 
 reg  [2:0]      tx_state;
 wire            tx_strobe;
@@ -92,11 +92,26 @@ reg  [3:0]      tx_pid;
 assign rx_strobe = rx_tvalid & rx_tready;
 assign tx_strobe = tx_tvalid & tx_tready;
 
-always @(posedge clk)
-    if (rx_strobe)
-        rx_tdata_prev <= rx_tdata;
+always @(posedge clk) begin
+    if (rx_strobe) begin
+        rx_tdata_prev[0] <= rx_tdata;
+        rx_tdata_prev[1] <= rx_tdata_prev[0];
+    end
+end
 
-assign rx_crc5 = crc5({rx_tdata[2:0], rx_tdata_prev});
+always @(posedge clk) begin
+    if (rx_strobe & rx_tlast) begin
+        rx_tdata_prev_valid[0] <= 1'b0;
+        rx_tdata_prev_valid[1] <= 1'b0;
+        rx_tdata_prev_valid[2] <= 1'b0;
+    end else if (rx_strobe) begin
+        rx_tdata_prev_valid[0] <= 1'b1;
+        rx_tdata_prev_valid[1] <= rx_tdata_prev_valid[0];
+        rx_tdata_prev_valid[2] <= rx_tdata_prev_valid[1];
+    end
+end
+
+assign rx_crc5 = crc5({rx_tdata[2:0], rx_tdata_prev[0]});
 assign rx_crc5_valid = rx_tdata[7:3] == rx_crc5;
 
 always @(posedge clk) begin
@@ -167,31 +182,28 @@ always @(posedge clk) begin
         rx_endpoint[3:1] <= rx_tdata[2:0];
     end
 end
-
-// One clock delay for CRC-16 calculation
-always @(posedge clk)
-    if (rst)
-        rx_crc_en <= 1'b0;
-    else if ((rx_state == S_RX_DATA) & rx_strobe)
-        rx_crc_en <= 1'b1;
-    else if (rx_state != S_RX_DATA)
-        rx_crc_en <= 1'b0;
         
 always @(posedge clk)
     if (rx_state != S_RX_DATA)
         rx_crc16 <= 16'hFFFF;
-    else if (rx_crc_en & rx_strobe)
-        rx_crc16 <= crc16(rx_tdata_prev, rx_crc16);
+    else if (rx_tdata_prev_valid[1] & rx_strobe)
+        rx_crc16 <= crc16(rx_tdata_prev[0], rx_crc16);
+        
+always @(*) begin: CRC_REV
+    integer i;
+    for (i = 0; i < 16; i = i + 1)
+        rx_crc16_rev[i] <= ~rx_crc16[15-i];
+end
 
 always @(posedge clk)
     if ((rx_state == S_RX_PID) & rx_strobe & (rx_tdata[1:0] == 2'b11))
         rx_data_type <= rx_tdata[3:2];
 
-assign rx_data_error = rx_data_tlast & (rx_crc16 != {rx_tdata_prev, rx_tdata});
-assign rx_data_tdata = rx_tdata;
+assign rx_data_error = rx_data_tlast & (rx_crc16_rev != {rx_tdata, rx_tdata_prev[0]});
+assign rx_data_tdata = rx_tdata_prev[1];
 assign rx_data_tlast = rx_tlast;
-assign rx_data_tvalid = rx_tvalid & (rx_state == S_RX_DATA);
-    
+assign rx_data_tvalid = rx_tdata_prev_valid[2] & rx_tvalid & (rx_state == S_RX_DATA);
+
 assign rx_tready = (rx_state == S_RX_DATA) ? rx_data_tready : (rx_state != S_RX_SIG_OUT);
 
 assign rx_in_token = (rx_state == S_RX_SIG_OUT) & (rx_pid == 4'b1001);
