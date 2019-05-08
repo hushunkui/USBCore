@@ -7,9 +7,9 @@ module usb_tlp (
     input  wire         rx_tvalid,
     output wire         rx_tready,
     
-    output wire [7:0]   tx_tdata,
-    output wire         tx_tlast,
-    output wire         tx_tvalid,
+    output reg  [7:0]   tx_tdata,
+    output reg          tx_tlast,
+    output reg          tx_tvalid,
     input  wire         tx_tready,
     
     output wire         rx_in_token,
@@ -26,17 +26,30 @@ module usb_tlp (
     output wire         rx_sof,
     output reg  [10:0]  rx_frame_number,
     
+    output wire         rx_data,
     output reg  [1:0]   rx_data_type,
+    
     output wire         rx_data_error,
     output wire [7:0]   rx_data_tdata,
     output wire         rx_data_tlast,
     output wire         rx_data_tvalid,
     input  wire         rx_data_tready,
     
-    input wire          tx_ack,
-    input wire          tx_nack,
-    input wire          tx_stall,
-    input wire          tx_nyet
+    output wire         tx_ready,
+    
+    input  wire         tx_ack,
+    input  wire         tx_nack,
+    input  wire         tx_stall,
+    input  wire         tx_nyet,
+    
+    input  wire         tx_data,
+    input  wire         tx_data_null,
+    input  wire [1:0]   tx_data_type,
+    
+    input  wire [7:0]   tx_data_tdata,
+    input  wire         tx_data_tlast,
+    input  wire         tx_data_tvalid,
+    output wire         tx_data_tready
 );
 
 function [4:0] crc5;
@@ -74,7 +87,7 @@ end endfunction
 localparam S_RX_PID = 0, S_RX_TKN_ADDR = 1, S_RX_TKN_EPCRC = 2, S_RX_SIG_OUT = 3, S_RX_DATA = 4, 
            S_RX_UNKNOWN = 5;
 
-localparam S_TX_IDLE = 0, S_TX_ACK_PID = 1;
+localparam S_TX_IDLE = 0, S_TX_ACK_PID = 1, S_TX_DATA_PID = 2, S_TX_DATA = 3, S_TX_CRC = 4;
            
 reg  [2:0]      rx_state;
 wire            rx_strobe;
@@ -88,6 +101,9 @@ reg  [15:0]     rx_crc16, rx_crc16_rev;
 reg  [2:0]      tx_state;
 wire            tx_strobe;
 reg  [3:0]      tx_pid;
+reg  [15:0]     tx_crc16, tx_crc16_rev;
+reg             tx_crc_low;
+reg             tx_null;
 
 assign rx_strobe = rx_tvalid & rx_tready;
 assign tx_strobe = tx_tvalid & tx_tready;
@@ -189,7 +205,7 @@ always @(posedge clk)
     else if (rx_tdata_prev_valid[1] & rx_strobe)
         rx_crc16 <= crc16(rx_tdata_prev[0], rx_crc16);
         
-always @(*) begin: CRC_REV
+always @(*) begin: RX_CRC_REV
     integer i;
     for (i = 0; i < 16; i = i + 1)
         rx_crc16_rev[i] <= ~rx_crc16[15-i];
@@ -204,7 +220,7 @@ assign rx_data_tdata = rx_tdata_prev[1];
 assign rx_data_tlast = rx_tlast;
 assign rx_data_tvalid = rx_tdata_prev_valid[2] & rx_tvalid & (rx_state == S_RX_DATA);
 
-assign rx_tready = (rx_state == S_RX_DATA) ? rx_data_tready : (rx_state != S_RX_SIG_OUT);
+assign rx_tready = (rx_state == S_RX_DATA) ? rx_data_tready | ~rx_tdata_prev_valid[1] | ~rx_tdata_prev_valid[2] : (rx_state != S_RX_SIG_OUT);
 
 assign rx_in_token = (rx_state == S_RX_SIG_OUT) & (rx_pid == 4'b1001);
 assign rx_out_token = (rx_state == S_RX_SIG_OUT) & (rx_pid == 4'b0001);
@@ -216,6 +232,17 @@ assign rx_nack = (rx_state == S_RX_SIG_OUT) & (rx_pid == 4'b0110);
 assign rx_stall = (rx_state == S_RX_SIG_OUT) & (rx_pid == 4'b1010);
 assign rx_nyet = (rx_state == S_RX_SIG_OUT) & (rx_pid == 4'b1110);
 
+reg  rx_data_first;
+always @(posedge clk)
+    if (rst)
+        rx_data_first <= 1'b1;
+    else if ((rx_state == S_RX_DATA) & rx_data_first)
+        rx_data_first <= 1'b0;
+    else if (rx_state != S_RX_DATA) 
+        rx_data_first <= 1'b1;
+
+assign rx_data = (rx_state == S_RX_DATA) & rx_data_first;
+
 always @(posedge clk) begin
     if (rst)
         tx_state <= S_TX_IDLE;
@@ -223,26 +250,94 @@ always @(posedge clk) begin
     S_TX_IDLE:
         if (tx_ack | tx_nack | tx_stall | tx_nyet)
             tx_state <= S_TX_ACK_PID;
+        else if (tx_data)
+            tx_state <= S_TX_DATA_PID;
             
     S_TX_ACK_PID:
         if (tx_strobe)
+            tx_state <= S_TX_IDLE;
+            
+    S_TX_DATA_PID:
+        if (tx_strobe)
+            tx_state <= tx_null ? S_TX_CRC : S_TX_DATA;
+    
+    S_TX_DATA:
+        if (tx_strobe & tx_data_tlast)
+            tx_state <= S_TX_CRC;
+            
+    S_TX_CRC:
+        if (tx_strobe & tx_tlast)
             tx_state <= S_TX_IDLE;
         
     endcase
 end
 
 always @(posedge clk) 
+    if ((tx_state == S_TX_IDLE) & tx_data)
+        tx_null <= tx_data_null;
+
+always @(posedge clk) 
     if ((tx_state == S_TX_IDLE) & tx_ack)
         tx_pid <= 4'b0010;
     else if ((tx_state == S_TX_IDLE) & tx_nack)
         tx_pid <= 4'b0110;
-    else if ((tx_state == S_TX_IDLE) & rx_stall)
+    else if ((tx_state == S_TX_IDLE) & tx_stall)
         tx_pid <= 4'b1010;
-    else if ((tx_state == S_TX_IDLE) & rx_nyet)
+    else if ((tx_state == S_TX_IDLE) & tx_nyet)
         tx_pid <= 4'b1110;
+    else if ((tx_state == S_TX_IDLE) & tx_data)
+        tx_pid <= {tx_data_type, 2'b11};
+    
+always @(posedge clk)
+    if (tx_state == S_TX_DATA_PID)
+        tx_crc16 <= 16'hFFFF;
+    else if (tx_data_tvalid & tx_data_tready)
+        tx_crc16 <= crc16(tx_data_tdata, tx_crc16);
         
-assign tx_tdata = {~tx_pid, tx_pid};
-assign tx_tlast = (tx_state == S_TX_ACK_PID) ? 1'b1 : 1'b0;
-assign tx_tvalid = (tx_state == S_TX_ACK_PID) ? 1'b1 : 1'b0;
+always @(*) begin: TX_CRC_REV
+    integer i;
+    for (i = 0; i < 16; i = i + 1)
+        tx_crc16_rev[i] <= ~tx_crc16[15-i];
+end
+    
+always @(posedge clk) 
+    if (tx_state != S_TX_CRC)
+        tx_crc_low <= 1'b1;
+    else if (tx_strobe)
+        tx_crc_low <= 1'b0;
         
+assign tx_ready = (tx_state == S_TX_IDLE);
+        
+always @(*) begin
+    case (tx_state)
+    S_TX_ACK_PID, S_TX_DATA_PID:
+        tx_tdata = {~tx_pid, tx_pid};
+    S_TX_CRC:
+        tx_tdata = tx_crc_low ? tx_crc16_rev[7:0] : tx_crc16_rev[15:8];
+    default:
+        tx_tdata = tx_data_tdata;
+    endcase
+end
+        
+always @(*) begin
+    case (tx_state)
+    S_TX_ACK_PID:   tx_tlast = 1'b1;
+    S_TX_CRC:       tx_tlast = ~tx_crc_low;
+    default:        tx_tlast = 1'b0;
+    endcase
+end
+
+always @(*) begin
+    case (tx_state)
+    S_TX_ACK_PID, S_TX_DATA_PID, S_TX_CRC:   
+        tx_tvalid = 1'b1;
+    S_TX_DATA: 
+        tx_tvalid = tx_data_tvalid;
+    default:        
+        tx_tvalid = 1'b0;
+    endcase
+end
+
+assign tx_data_tready = (tx_state == S_TX_DATA) ? tx_tready : 1'b0;
+
 endmodule
